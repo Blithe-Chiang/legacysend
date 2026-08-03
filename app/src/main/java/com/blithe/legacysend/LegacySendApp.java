@@ -3,9 +3,12 @@ package com.blithe.legacysend;
 import android.app.Application;
 import android.content.Context;
 import android.content.Intent;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import com.blithe.legacysend.discovery.DiscoveryManager;
 import com.blithe.legacysend.model.DeviceInfo;
@@ -24,6 +27,10 @@ import java.util.concurrent.Executors;
 
 public final class LegacySendApp extends Application implements DiscoveryManager.Listener,
         TransferServer.Listener {
+    private static final String TAG = "LegacySend";
+    private static final int NETWORK_WAIT_ATTEMPTS = 100;
+    private static final long NETWORK_WAIT_DELAY_MS = 100L;
+
     public interface UiListener {
         void onReady(DeviceInfo self);
         void onServiceChanged(boolean running, String detail);
@@ -90,14 +97,17 @@ public final class LegacySendApp extends Application implements DiscoveryManager
         postService(false, "正在启动接收服务…");
         background.execute(new Runnable() {
             @Override public void run() {
+                TransferServer newServer = null;
+                DiscoveryManager newDiscovery = null;
                 try {
                     int attempts = 0;
                     while ((identity == null || self == null) && attempts++ < 200) Thread.sleep(50L);
                     if (identity == null || self == null) throw new IllegalStateException("设备身份初始化超时");
-                    TransferServer newServer = new TransferServer(LegacySendApp.this, identity, self,
+                    waitForConnectedNetwork();
+                    newServer = new TransferServer(LegacySendApp.this, identity, self,
                             LegacySendApp.this);
                     newServer.start();
-                    DiscoveryManager newDiscovery = new DiscoveryManager(LegacySendApp.this, self,
+                    newDiscovery = new DiscoveryManager(LegacySendApp.this, self,
                             LegacySendApp.this);
                     newDiscovery.start();
                     server = newServer;
@@ -106,16 +116,28 @@ public final class LegacySendApp extends Application implements DiscoveryManager
                     postService(true, "接收服务运行中 · "
                             + self.getProtocol().toUpperCase(java.util.Locale.US) + " 端口 53317");
                 } catch (Exception error) {
-                    if (server != null) server.stop();
-                    server = null;
-                    if (discovery != null) discovery.stop();
-                    discovery = null;
+                    Log.e(TAG, "Failed to start receiving", error);
+                    if (newDiscovery != null) newDiscovery.stop();
+                    if (newServer != null) newServer.stop();
+                    if (server == newServer) server = null;
+                    if (discovery == newDiscovery) discovery = null;
                     postService(false, "启动失败：" + readable(error));
                 } finally {
                     starting = false;
                 }
             }
         });
+    }
+
+    private void waitForConnectedNetwork() throws InterruptedException {
+        ConnectivityManager connectivity = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectivity == null) return;
+        for (int attempt = 0; attempt < NETWORK_WAIT_ATTEMPTS; attempt++) {
+            NetworkInfo active = connectivity.getActiveNetworkInfo();
+            if (active != null && active.isConnected()) return;
+            Thread.sleep(NETWORK_WAIT_DELAY_MS);
+        }
+        throw new IllegalStateException("网络尚未连接，请连接 Wi-Fi 后重试");
     }
 
     public void stopReceiving() {

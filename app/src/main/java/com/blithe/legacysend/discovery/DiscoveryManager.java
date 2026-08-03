@@ -40,25 +40,45 @@ public final class DiscoveryManager {
 
     public synchronized void start() throws Exception {
         if (running.get()) return;
-        WifiManager wifi = (WifiManager) context.getApplicationContext()
-                .getSystemService(Context.WIFI_SERVICE);
-        if (wifi != null) {
-            multicastLock = wifi.createMulticastLock("legacysend-discovery");
-            multicastLock.setReferenceCounted(false);
-            multicastLock.acquire();
+        MulticastSocket newSocket = null;
+        WifiManager.MulticastLock newMulticastLock = null;
+        boolean joined = false;
+        try {
+            WifiManager wifi = (WifiManager) context.getApplicationContext()
+                    .getSystemService(Context.WIFI_SERVICE);
+            if (wifi != null) {
+                newMulticastLock = wifi.createMulticastLock("legacysend-discovery");
+                newMulticastLock.setReferenceCounted(false);
+                newMulticastLock.acquire();
+            }
+            newSocket = new MulticastSocket(null);
+            newSocket.setReuseAddress(true);
+            newSocket.bind(new InetSocketAddress(PORT));
+            newSocket.setSoTimeout(1500);
+            newSocket.joinGroup(InetAddress.getByName(GROUP));
+            joined = true;
+            socket = newSocket;
+            multicastLock = newMulticastLock;
+            running.set(true);
+            listenThread = new Thread(new Runnable() {
+                @Override public void run() { listenLoop(); }
+            }, "LegacySend-discovery");
+            listenThread.start();
+            announce();
+        } catch (Exception error) {
+            running.set(false);
+            socket = null;
+            listenThread = null;
+            if (newSocket != null) {
+                if (joined) {
+                    try { newSocket.leaveGroup(safeGroup()); } catch (Exception ignored) {}
+                }
+                newSocket.close();
+            }
+            if (newMulticastLock != null && newMulticastLock.isHeld()) newMulticastLock.release();
+            multicastLock = null;
+            throw error;
         }
-        MulticastSocket newSocket = new MulticastSocket(null);
-        newSocket.setReuseAddress(true);
-        newSocket.bind(new InetSocketAddress(PORT));
-        newSocket.setSoTimeout(1500);
-        newSocket.joinGroup(InetAddress.getByName(GROUP));
-        socket = newSocket;
-        running.set(true);
-        listenThread = new Thread(new Runnable() {
-            @Override public void run() { listenLoop(); }
-        }, "LegacySend-discovery");
-        listenThread.start();
-        announce();
     }
 
     public void announce() {
