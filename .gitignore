@@ -1,0 +1,19 @@
+# Local Android and Gradle state
+local.properties
+.gradle/
+**/.gradle/
+**/build/
+
+# IDE and operating-system files
+.idea/
+*.iml
+.DS_Store
+**/.DS_Store
+
+# Test evidence generated during manual verification
+docs/screenshots/
+**/captures/
+
+# Native build output, should native code be added later
+.cxx/
+**/.cxx/

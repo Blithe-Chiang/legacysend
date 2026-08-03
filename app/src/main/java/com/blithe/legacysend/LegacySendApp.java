@@ -1,0 +1,285 @@
+package com.blithe.legacysend;
+
+import android.app.Application;
+import android.content.Context;
+import android.content.Intent;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+
+import com.blithe.legacysend.discovery.DiscoveryManager;
+import com.blithe.legacysend.model.DeviceInfo;
+import com.blithe.legacysend.model.TransferFile;
+import com.blithe.legacysend.security.TlsIdentity;
+import com.blithe.legacysend.server.IncomingSession;
+import com.blithe.legacysend.server.TransferServer;
+import com.blithe.legacysend.transfer.TransferClient;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public final class LegacySendApp extends Application implements DiscoveryManager.Listener,
+        TransferServer.Listener {
+    public interface UiListener {
+        void onReady(DeviceInfo self);
+        void onServiceChanged(boolean running, String detail);
+        void onDevicesChanged(List<DeviceInfo> devices);
+        void onIncoming(IncomingSession session);
+        void onTransferProgress(boolean sending, String title, String currentFile, int percent, String path);
+        void onTransferResult(boolean sending, boolean success, String message);
+    }
+
+    private final Handler main = new Handler(Looper.getMainLooper());
+    private final ExecutorService background = Executors.newCachedThreadPool();
+    private final Map<String, DeviceInfo> devices = new LinkedHashMap<String, DeviceInfo>();
+    private volatile UiListener uiListener;
+    private volatile DeviceInfo self;
+    private volatile TlsIdentity identity;
+    private volatile TransferServer server;
+    private volatile DiscoveryManager discovery;
+    private volatile TransferClient transferClient;
+    private volatile boolean starting;
+    private volatile IncomingSession activeIncoming;
+
+    @Override public void onCreate() {
+        super.onCreate();
+        background.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    identity = TlsIdentity.loadOrCreate(LegacySendApp.this);
+                    String model = Build.MANUFACTURER + " " + Build.MODEL;
+                    String alias = Build.MODEL == null || Build.MODEL.length() == 0 ? "安卓设备" : Build.MODEL;
+                    // Android 4.x 的 TLS 服务端只提供现代 Rust TLS 已移除的 CBC 密码套件。
+                    // LocalSend v2 明确定义了 HTTP 模式，因此旧系统接收端使用 HTTP 以保持互操作。
+                    String receiveProtocol = Build.VERSION.SDK_INT <= 20 ? "http" : "https";
+                    self = new DeviceInfo(alias, DeviceInfo.PROTOCOL_VERSION, model.trim(), "mobile",
+                            identity.getFingerprint(), DiscoveryManager.PORT, receiveProtocol, false, null);
+                    transferClient = new TransferClient(getContentResolver(), identity, self);
+                    postReady();
+                } catch (Exception error) {
+                    postService(false, "初始化安全证书失败：" + readable(error));
+                }
+            }
+        });
+    }
+
+    public void setUiListener(UiListener listener) {
+        uiListener = listener;
+        if (listener != null) {
+            if (self != null) listener.onReady(self);
+            boolean running = server != null && server.isRunning();
+            String detail = running && self != null
+                    ? "接收服务运行中 · " + self.getProtocol().toUpperCase(java.util.Locale.US)
+                            + " 端口 " + self.getPort()
+                    : "接收服务已停止";
+            listener.onServiceChanged(running, detail);
+            listener.onDevicesChanged(deviceSnapshot());
+            if (activeIncoming != null && activeIncoming.getDecision() == IncomingSession.Decision.PENDING) {
+                listener.onIncoming(activeIncoming);
+            }
+        }
+    }
+
+    public void startReceiving() {
+        if (starting || (server != null && server.isRunning())) return;
+        starting = true;
+        postService(false, "正在启动接收服务…");
+        background.execute(new Runnable() {
+            @Override public void run() {
+                try {
+                    int attempts = 0;
+                    while ((identity == null || self == null) && attempts++ < 200) Thread.sleep(50L);
+                    if (identity == null || self == null) throw new IllegalStateException("设备身份初始化超时");
+                    TransferServer newServer = new TransferServer(LegacySendApp.this, identity, self,
+                            LegacySendApp.this);
+                    newServer.start();
+                    DiscoveryManager newDiscovery = new DiscoveryManager(LegacySendApp.this, self,
+                            LegacySendApp.this);
+                    newDiscovery.start();
+                    server = newServer;
+                    discovery = newDiscovery;
+                    startKeepAliveService();
+                    postService(true, "接收服务运行中 · "
+                            + self.getProtocol().toUpperCase(java.util.Locale.US) + " 端口 53317");
+                } catch (Exception error) {
+                    if (server != null) server.stop();
+                    server = null;
+                    if (discovery != null) discovery.stop();
+                    discovery = null;
+                    postService(false, "启动失败：" + readable(error));
+                } finally {
+                    starting = false;
+                }
+            }
+        });
+    }
+
+    public void stopReceiving() {
+        DiscoveryManager currentDiscovery = discovery;
+        TransferServer currentServer = server;
+        discovery = null;
+        server = null;
+        if (currentDiscovery != null) currentDiscovery.stop();
+        if (currentServer != null) currentServer.stop();
+        stopService(new Intent(this, ReceiveService.class));
+        postService(false, "接收服务已停止");
+    }
+
+    public void refreshDiscovery() {
+        synchronized (devices) { devices.clear(); }
+        postDevices();
+        DiscoveryManager current = discovery;
+        if (current != null) current.announce();
+    }
+
+    public void sendFiles(final DeviceInfo target, final List<TransferFile> files) {
+        if (transferClient == null) {
+            postResult(true, false, "应用尚未初始化完成");
+            return;
+        }
+        background.execute(new Runnable() {
+            @Override public void run() {
+                transferClient.send(target, files, new TransferClient.Listener() {
+                    @Override public void onProgress(String file, int index, int count, int percent) {
+                        postProgress(true, "正在发送到 " + target.getAlias() + "（" + index + "/" + count + "）",
+                                file, percent, "");
+                    }
+                    @Override public void onFinished(String message) { postResult(true, true, message); }
+                    @Override public void onFailed(String message) { postResult(true, false, message); }
+                });
+            }
+        });
+    }
+
+    public void cancelSending() {
+        if (transferClient != null) transferClient.cancel();
+    }
+
+    public void decideIncoming(IncomingSession session, boolean accept) {
+        if (session == null) return;
+        if (accept) session.accept(); else session.reject();
+        if (!accept && activeIncoming == session) activeIncoming = null;
+    }
+
+    public void cancelIncoming() {
+        IncomingSession current = activeIncoming;
+        if (current != null) {
+            TransferServer currentServer = server;
+            if (currentServer != null) currentServer.cancel(current);
+            current.cancel();
+        }
+    }
+
+    @Override public void onDevice(final DeviceInfo device, boolean announced) {
+        addDevice(device);
+        if (announced && transferClient != null) {
+            background.execute(new Runnable() {
+                @Override public void run() {
+                    try { addDevice(transferClient.register(device)); } catch (Exception ignored) {}
+                }
+            });
+        }
+    }
+
+    @Override public void onDiscoveryError(String message) { postResult(false, false, message); }
+
+    @Override public void onRegistered(DeviceInfo device) { addDevice(device); }
+
+    @Override public void onIncoming(final IncomingSession session) {
+        activeIncoming = session;
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onIncoming(session); else session.reject();
+            }
+        });
+    }
+
+    @Override public void onReceiveProgress(IncomingSession session, String fileName, int percent,
+                                            String savePath) {
+        postProgress(false, "正在接收来自 " + session.getSender().getAlias() + " 的文件",
+                fileName, percent, savePath);
+    }
+
+    @Override public void onReceiveFinished(IncomingSession session, String savePath) {
+        if (activeIncoming == session) activeIncoming = null;
+        postResult(false, true, "接收完成，文件保存在：" + savePath);
+    }
+
+    @Override public void onReceiveFailed(IncomingSession session, String message) {
+        if (session != null && activeIncoming == session) activeIncoming = null;
+        postResult(false, false, message);
+    }
+
+    public DeviceInfo getSelf() { return self; }
+
+    private void addDevice(DeviceInfo device) {
+        if (device == null || device.getAddress() == null) return;
+        synchronized (devices) { devices.put(device.key(), device); }
+        postDevices();
+    }
+
+    private List<DeviceInfo> deviceSnapshot() {
+        synchronized (devices) { return new ArrayList<DeviceInfo>(devices.values()); }
+    }
+
+    private void postReady() {
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onReady(self);
+            }
+        });
+    }
+
+    private void postService(final boolean running, final String detail) {
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onServiceChanged(running, detail);
+            }
+        });
+    }
+
+    private void postDevices() {
+        final List<DeviceInfo> snapshot = deviceSnapshot();
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onDevicesChanged(snapshot);
+            }
+        });
+    }
+
+    private void postProgress(final boolean sending, final String title, final String file,
+                              final int percent, final String path) {
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onTransferProgress(sending, title, file, percent, path);
+            }
+        });
+    }
+
+    private void postResult(final boolean sending, final boolean success, final String message) {
+        main.post(new Runnable() {
+            @Override public void run() {
+                UiListener listener = uiListener;
+                if (listener != null) listener.onTransferResult(sending, success, message);
+            }
+        });
+    }
+
+    private void startKeepAliveService() {
+        Intent intent = new Intent(this, ReceiveService.class);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent); else startService(intent);
+    }
+
+    private static String readable(Exception error) {
+        return error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+    }
+}
