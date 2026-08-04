@@ -18,6 +18,12 @@ public final class StorageUtils {
     private StorageUtils() {}
 
     public static TransferFile describe(ContentResolver resolver, Uri uri) {
+        // ES 文件浏览器在 Android 4.x 上通过 file:// URI 分享文件。这类 URI 没有
+        // ContentProvider，因此无法通过 OpenableColumns 查询名称，需要直接读取路径。
+        if ("file".equalsIgnoreCase(uri.getScheme()) && uri.getPath() != null) {
+            return describe(new File(uri.getPath()), uri);
+        }
+
         String name = "未命名文件";
         long size = -1L;
         Cursor cursor = resolver.query(uri, new String[] {
@@ -50,11 +56,15 @@ public final class StorageUtils {
     }
 
     public static TransferFile describe(File file) {
+        return describe(file, Uri.fromFile(file));
+    }
+
+    private static TransferFile describe(File file, Uri uri) {
         String extension = MimeTypeMap.getFileExtensionFromUrl(Uri.fromFile(file).toString());
         String type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(
                 extension == null ? "" : extension.toLowerCase(java.util.Locale.US));
         return new TransferFile(UUID.randomUUID().toString(), sanitizeFileName(file.getName()),
-                file.length(), type, Uri.fromFile(file));
+                file.length(), type, uri);
     }
 
     public static File receiveDirectory(Context context) {

@@ -154,8 +154,12 @@ public final class LegacySendApp extends Application implements DiscoveryManager
     public void refreshDiscovery() {
         synchronized (devices) { devices.clear(); }
         postDevices();
-        DiscoveryManager current = discovery;
-        if (current != null) current.announce();
+        final DiscoveryManager current = discovery;
+        if (current != null) {
+            background.execute(new Runnable() {
+                @Override public void run() { current.announce(); }
+            });
+        }
     }
 
     public void sendFiles(final DeviceInfo target, final List<TransferFile> files) {

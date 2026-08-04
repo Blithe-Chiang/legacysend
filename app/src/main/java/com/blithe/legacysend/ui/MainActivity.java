@@ -63,6 +63,13 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
         ensureStoragePermission();
         app.setUiListener(this);
         app.startReceiving();
+        importSharedFiles(getIntent());
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        importSharedFiles(intent);
     }
 
     @Override protected void onResume() {
@@ -227,11 +234,44 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
     }
 
     private void addSelectedUri(Uri uri, int flags) {
+        if (uri == null) return;
         try {
             getContentResolver().takePersistableUriPermission(uri, flags & Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (Exception ignored) {}
         for (TransferFile file : selectedFiles) if (uri.equals(file.getUri())) return;
         selectedFiles.add(StorageUtils.describe(getContentResolver(), uri));
+    }
+
+    private void importSharedFiles(Intent intent) {
+        if (intent == null) return;
+        String action = intent.getAction();
+        if (!Intent.ACTION_SEND.equals(action) && !Intent.ACTION_SEND_MULTIPLE.equals(action)) return;
+
+        int previousCount = selectedFiles.size();
+        int flags = intent.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+        if (Intent.ACTION_SEND_MULTIPLE.equals(action)) {
+            ArrayList<Uri> streams = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
+            if (streams != null) {
+                for (Uri uri : streams) addSelectedUri(uri, flags);
+            }
+        } else {
+            addSelectedUri((Uri) intent.getParcelableExtra(Intent.EXTRA_STREAM), flags);
+        }
+
+        ClipData clip = intent.getClipData();
+        if (clip != null) {
+            for (int index = 0; index < clip.getItemCount(); index++) {
+                addSelectedUri(clip.getItemAt(index).getUri(), flags);
+            }
+        }
+        renderSelectedFiles();
+        int importedCount = selectedFiles.size() - previousCount;
+        if (importedCount > 0) {
+            Toast.makeText(this, "已添加 " + importedCount + " 个分享文件", Toast.LENGTH_SHORT).show();
+        } else if (selectedFiles.isEmpty()) {
+            Toast.makeText(this, "未找到可分享的文件", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void renderSelectedFiles() {
