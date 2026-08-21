@@ -16,6 +16,7 @@ import com.blithe.legacysend.model.TransferFile;
 import com.blithe.legacysend.security.TlsIdentity;
 import com.blithe.legacysend.server.IncomingSession;
 import com.blithe.legacysend.server.TransferServer;
+import com.blithe.legacysend.storage.StorageUtils;
 import com.blithe.legacysend.transfer.TransferClient;
 
 import java.util.ArrayList;
@@ -187,7 +188,12 @@ public final class LegacySendApp extends Application implements DiscoveryManager
 
     public void decideIncoming(IncomingSession session, boolean accept) {
         if (session == null) return;
-        if (accept) session.accept(); else session.reject();
+        if (accept) {
+            session.setReceiveDirectory(StorageUtils.receiveDirectory(this));
+            session.accept();
+        } else {
+            session.reject();
+        }
         if (!accept && activeIncoming == session) activeIncoming = null;
     }
 

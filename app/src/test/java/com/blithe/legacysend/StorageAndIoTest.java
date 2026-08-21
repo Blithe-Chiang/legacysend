@@ -14,6 +14,7 @@ import java.io.FileOutputStream;
 import java.io.IOException;
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Random;
 
 import static org.junit.Assert.assertArrayEquals;
@@ -35,6 +36,12 @@ public class StorageAndIoTest {
     @Test public void unsafePathCharactersCannotEscapeDirectory() throws Exception {
         assertEquals("_上级_秘密.txt", StorageUtils.sanitizeFileName("/上级\\秘密.txt"));
         assertEquals("隐藏", StorageUtils.sanitizeFileName("..隐藏"));
+    }
+
+    @Test public void documentNamesUseTheNextAvailableSuffix() {
+        HashSet<String> names = new HashSet<String>(Arrays.asList(
+                "报告.txt", "报告 (1).txt", "报告 (2).txt"));
+        assertEquals("报告 (3).txt", StorageUtils.uniqueName(names, "报告.txt"));
     }
 
     @Test public void streamCopyPreservesLargeContentAndHash() throws Exception {

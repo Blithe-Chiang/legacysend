@@ -7,6 +7,7 @@ import com.blithe.legacysend.model.TransferFile;
 import com.blithe.legacysend.protocol.ProtocolJson;
 import com.blithe.legacysend.security.TlsIdentity;
 import com.blithe.legacysend.storage.StorageUtils;
+import com.blithe.legacysend.storage.ReceiveDirectory;
 import com.blithe.legacysend.util.IoUtils;
 
 import org.json.JSONObject;
@@ -14,8 +15,6 @@ import org.json.JSONObject;
 import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -224,16 +223,17 @@ public final class TransferServer {
             respond(output, 400, "text/plain; charset=utf-8", "文件大小不匹配".getBytes(UTF8));
             return;
         }
-        File directory = StorageUtils.receiveDirectory(context);
-        if (!directory.exists() && !directory.mkdirs()) throw new IOException("无法创建保存目录");
-        final File target;
-        synchronized (StorageUtils.class) {
-            target = StorageUtils.uniqueFile(directory, metadata.getFileName());
-            if (!target.createNewFile()) throw new IOException("无法预留目标文件名");
-        }
-        final File temporary = new File(directory, "." + target.getName() + "." + sessionId + ".part");
+        ReceiveDirectory directory = session.getReceiveDirectory();
+        if (directory == null) directory = StorageUtils.receiveDirectory(context);
+        final ReceiveDirectory.PendingFile target;
         try {
-            FileOutputStream fileOutput = new FileOutputStream(temporary);
+            target = directory.createFile(metadata.getFileName(), metadata.getFileType(), sessionId);
+        } catch (Exception error) {
+            listener.onReceiveFailed(session, "无法使用保存目录：" + readable(error));
+            throw error;
+        }
+        try {
+            OutputStream fileOutput = target.openOutputStream();
             try {
                 final IncomingSession currentSession = session;
                 IoUtils.copy(input, fileOutput, request.contentLength, new IoUtils.ProgressListener() {
@@ -243,15 +243,13 @@ public final class TransferServer {
                         }
                         long overall = currentSession.updateFileProgress(fileId, copied);
                         listener.onReceiveProgress(currentSession, metadata.getFileName(),
-                                IoUtils.percent(overall, currentSession.getTotalBytes()), target.getAbsolutePath());
+                                IoUtils.percent(overall, currentSession.getTotalBytes()), target.getDisplayPath());
                     }
                 });
             } finally {
                 fileOutput.close();
             }
-            synchronized (StorageUtils.class) {
-                if (!target.delete() || !temporary.renameTo(target)) throw new IOException("无法保存文件");
-            }
+            target.commit();
             session.getReceivedBytes().addAndGet(metadata.getSize());
             Set<String> done = completedFiles.get(sessionId);
             if (done != null) done.add(fileId);
@@ -259,11 +257,10 @@ public final class TransferServer {
             if (done != null && done.size() == session.getFiles().size()) {
                 sessions.remove(sessionId);
                 completedFiles.remove(sessionId);
-                listener.onReceiveFinished(session, directory.getAbsolutePath());
+                listener.onReceiveFinished(session, directory.getDisplayPath());
             }
         } catch (Exception error) {
-            if (temporary.exists()) temporary.delete();
-            if (target.exists() && target.length() == 0) target.delete();
+            target.discard();
             listener.onReceiveFailed(session, readable(error));
             throw error;
         }

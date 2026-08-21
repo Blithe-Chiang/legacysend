@@ -41,11 +41,13 @@ import java.util.Locale;
 public final class MainActivity extends Activity implements LegacySendApp.UiListener {
     private static final int PICK_FILES = 1001;
     private static final int STORAGE_PERMISSION = 1002;
+    private static final int PICK_SAVE_DIRECTORY = 1003;
 
     private LegacySendApp app;
     private TextView deviceName;
     private TextView serviceStatus;
     private Button serviceButton;
+    private TextView saveDirectory;
     private LinearLayout selectedFilesContainer;
     private LinearLayout devicesContainer;
     private final List<TransferFile> selectedFiles = new ArrayList<TransferFile>();
@@ -121,6 +123,28 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
         root.addView(serviceActions, matchWrap());
 
         root.addView(space(18));
+        root.addView(section("接收设置"));
+        saveDirectory = text("", 14, Color.DKGRAY);
+        root.addView(saveDirectory, matchWrap());
+        LinearLayout storageActions = horizontal();
+        Button chooseDirectory = button("选择保存目录");
+        chooseDirectory.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) { openSaveDirectoryPicker(); }
+        });
+        Button resetDirectory = button("恢复默认");
+        resetDirectory.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View view) {
+                StorageUtils.resetReceiveDirectory(MainActivity.this);
+                renderSaveDirectory();
+                Toast.makeText(MainActivity.this, "已恢复默认保存目录", Toast.LENGTH_SHORT).show();
+            }
+        });
+        storageActions.addView(chooseDirectory, weighted());
+        storageActions.addView(resetDirectory, weighted());
+        root.addView(storageActions, matchWrap());
+        renderSaveDirectory();
+
+        root.addView(space(18));
         root.addView(section("选择文件"));
         Button choose = button("选择一个或多个文件");
         choose.setOnClickListener(new View.OnClickListener() {
@@ -154,6 +178,70 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(intent, PICK_FILES);
+    }
+
+    private void openSaveDirectoryPicker() {
+        if (Build.VERSION.SDK_INT <= 20) {
+            openLegacySaveDirectory(legacyStorageRoot());
+            return;
+        }
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION
+                | Intent.FLAG_GRANT_PREFIX_URI_PERMISSION);
+        startActivityForResult(intent, PICK_SAVE_DIRECTORY);
+    }
+
+    private void openLegacySaveDirectory(final File directory) {
+        File[] listed = directory.listFiles();
+        if (listed == null) {
+            Toast.makeText(this, "无法读取此目录，请检查存储权限", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        final List<File> directories = new ArrayList<File>();
+        for (File entry : listed) if (entry.isDirectory() && entry.canRead()) directories.add(entry);
+        Collections.sort(directories, new Comparator<File>() {
+            @Override public int compare(File left, File right) {
+                return left.getName().compareToIgnoreCase(right.getName());
+            }
+        });
+        String[] labels = new String[directories.size()];
+        for (int i = 0; i < directories.size(); i++) labels[i] = directories.get(i).getName();
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                .setTitle("选择保存目录\n" + directory.getAbsolutePath())
+                .setItems(labels, new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        openLegacySaveDirectory(directories.get(which));
+                    }
+                })
+                .setNegativeButton("取消", null)
+                .setPositiveButton("使用此文件夹", new DialogInterface.OnClickListener() {
+                    @Override public void onClick(DialogInterface dialog, int which) {
+                        if (!directory.canWrite()) {
+                            Toast.makeText(MainActivity.this, "所选目录不可写", Toast.LENGTH_SHORT).show();
+                            return;
+                        }
+                        StorageUtils.setReceiveDirectory(MainActivity.this, directory);
+                        renderSaveDirectory();
+                        Toast.makeText(MainActivity.this, "保存目录已更新", Toast.LENGTH_SHORT).show();
+                    }
+                });
+        File root = legacyStorageRoot();
+        File parent = directory.getParentFile();
+        if (parent != null && !directory.equals(root)) {
+            builder.setNeutralButton("上一级", new DialogInterface.OnClickListener() {
+                @Override public void onClick(DialogInterface dialog, int which) {
+                    openLegacySaveDirectory(directory.getParentFile());
+                }
+            });
+        }
+        builder.show();
+    }
+
+    private void renderSaveDirectory() {
+        saveDirectory.setText(String.format(Locale.CHINA, "保存到：%s",
+                StorageUtils.receiveDirectory(this).getDisplayPath()));
     }
 
     private void openLegacyDirectory(final File directory) {
@@ -221,6 +309,30 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == PICK_SAVE_DIRECTORY) {
+            if (resultCode == RESULT_OK && data != null && data.getData() != null) {
+                Uri treeUri = data.getData();
+                try {
+                    int grantedFlags = data.getFlags();
+                    boolean canRead = (grantedFlags & Intent.FLAG_GRANT_READ_URI_PERMISSION) != 0;
+                    boolean canWrite = (grantedFlags & Intent.FLAG_GRANT_WRITE_URI_PERMISSION) != 0;
+                    if (canRead && canWrite) {
+                        getContentResolver().takePersistableUriPermission(treeUri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                                        | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    } else {
+                        throw new SecurityException("系统未授予目录读写权限");
+                    }
+                    StorageUtils.setReceiveDirectory(this, treeUri);
+                    renderSaveDirectory();
+                    Toast.makeText(this, "保存目录已更新", Toast.LENGTH_SHORT).show();
+                } catch (Exception error) {
+                    Toast.makeText(this, "无法使用所选目录：" + error.getMessage(),
+                            Toast.LENGTH_LONG).show();
+                }
+            }
+            return;
+        }
         if (requestCode != PICK_FILES || resultCode != RESULT_OK || data == null) return;
         int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION
                 | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
@@ -366,7 +478,7 @@ public final class MainActivity extends Activity implements LegacySendApp.UiList
                     @Override public void onClick(DialogInterface dialog, int which) {
                         app.decideIncoming(session, true);
                         showProgress(false, "等待发送方上传…", "", 0,
-                                StorageUtils.receiveDirectory(MainActivity.this).getAbsolutePath());
+                                StorageUtils.receiveDirectory(MainActivity.this).getDisplayPath());
                     }
                 }).create();
         dialog.show();

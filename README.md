@@ -2,7 +2,7 @@
 
 一个独立实现的原生 Android Java 局域网文件传输应用，目标是兼容 LocalSend Protocol v2.1 的设备发现和 Upload API。项目不引用、导入或构建相邻的 LocalSend 源码目录。
 
-当前版本：`1.2`（versionCode 3）。
+当前版本：`1.3.0`（versionCode 5）。
 
 ## 构建
 
@@ -33,6 +33,7 @@ app/build/outputs/apk/debug/app-debug.apk
 - UDP 组播设备发现、公告和回包
 - HTTP/HTTPS LocalSend v2 注册接口
 - 单文件和多文件选择、发送和接收
+- 可选择并持久保存接收目录，支持系统文档目录和 Android 4.4 文件系统目录
 - 接收前接受/拒绝
 - 文件级令牌、会话 ID、来源 IP 和证书指纹检查
 - 流式上传和保存，不将完整文件载入内存
@@ -64,9 +65,10 @@ app/src/main/java/com/blithe/legacysend/
 ## Android 4.4.2 处理
 
 - 使用 API 19 可用的 `ACTION_OPEN_DOCUMENT` 和 `ClipData` 多选文件。
-- API 19–28 将接收文件保存到公共 `Download/LegacySend`，使用旧版存储权限。
+- API 19–28 默认将接收文件保存到公共 `Download/LegacySend`，使用旧版存储权限。
+- API 19–20 通过应用内目录浏览器设置保存位置；API 21+ 通过系统目录选择器持久授权保存位置。
 - API 19–20 使用应用内旧版文件浏览器，绕过部分 Kindle 固件中会显示已删除下载记录的 DocumentsUI；可重复选择以添加多个文件。
-- API 29+ 保存到应用专属 `Android/data/com.blithe.legacysend/files/Download/LegacySend`，避免 Scoped Storage 写入失败。
+- API 29+ 默认保存到应用专属 `Android/data/com.blithe.legacysend/files/Download/LegacySend`，也可通过系统目录选择器保存到用户授权目录。
 - `AndroidKeyStore` 使用 API 18 引入的 `KeyPairGeneratorSpec` 生成 RSA 自签名设备身份。
 - API 19 上显式启用 TLS 1.2，同时保留对 TLS 1.0/1.1 的协商能力。
 - API 19–20 接收服务使用 LocalSend v2 官方定义的 HTTP 模式：旧版系统的 TLS 服务端仅支持 CBC 密码套件，与 LocalSend 1.17.0 的现代 Rust TLS 客户端没有共同套件。API 21+ 接收服务保持 HTTPS。
@@ -88,7 +90,7 @@ app/src/main/java/com/blithe/legacysend/
 
 ### 已实现并经过测试
 
-- 主机单元测试 12 项：协议序列化、多文件元数据、中文/特殊字符、接受/拒绝/取消/超时、重名、进度、流式复制、中断检测和内容哈希一致性。
+- 主机单元测试 13 项：协议序列化、多文件元数据、中文/特殊字符、接受/拒绝/取消/超时、重名、进度、流式复制、中断检测和内容哈希一致性。
 - Gradle 编译、Lint 和 debug APK 打包。
 - APK 清单检查确认 `minSdkVersion=19`、`targetSdkVersion=28`。
 - APK v1/v2 签名校验；v1 签名可供 Android 4.4.2 安装。
@@ -96,6 +98,7 @@ app/src/main/java/com/blithe/legacysend/
 - API 34 模拟器上的 `/info` 和 `/register` HTTPS 实际请求。
 - API 34 模拟器上的接收确认、中文文件名上传、18 字节流式落盘和内容读取一致性。
 - Kindle Android 4.4.2（API 19）真机安装、启动、应用内文件选择，以及向 Android 11 设备发送 5.2 KB 文件成功。
+- Kindle Android 4.4.2（API 19）真机选择接收目录、重启后设置保留，以及恢复默认目录。
 - 官方 LocalSend 1.17.0（Android 11）发现 Kindle，并向 Kindle Android 4.4.2 发送 6.3 KB 文件成功；发送端和接收端均显示完成，接收文件 SHA-256 与源文件一致。
 
 ## Kindle 4.4.2 文件选择修复
